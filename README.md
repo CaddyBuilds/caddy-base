@@ -29,13 +29,18 @@ An image repo needs four files besides its README.
 
 ```dockerfile
 ARG CADDY_VERSION
-FROM caddy:${CADDY_VERSION}-builder AS builder
-RUN xcaddy build \
+FROM --platform=$BUILDPLATFORM caddy:${CADDY_VERSION}-builder AS builder
+ARG TARGETOS TARGETARCH TARGETVARIANT
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=${TARGETVARIANT#v} CGO_ENABLED=0 XCADDY_PRINT_VERSION=0 \
+    xcaddy build \
     --with github.com/caddy-dns/cloudflare
 
 FROM caddy:${CADDY_VERSION} AS default
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 ```
+
+The builder stage runs on the build host and cross-compiles, so the Go build is never
+emulated; only the final `COPY` stage runs per platform. See [`examples/Dockerfile`](examples/Dockerfile).
 
 **`caddy-image.json`**, the values the workflows cannot derive:
 

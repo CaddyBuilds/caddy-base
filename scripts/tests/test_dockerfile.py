@@ -50,6 +50,16 @@ class ParseXcaddyModulesTest(unittest.TestCase):
             ],
         )
 
+    def test_env_prefixed_cross_compile_line(self):
+        path = _write(
+            "FROM --platform=$BUILDPLATFORM caddy:${CADDY_VERSION}-builder AS builder\n"
+            "ARG TARGETOS TARGETARCH TARGETVARIANT\n"
+            "RUN GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=${TARGETVARIANT#v} CGO_ENABLED=0 \\\n"
+            "    xcaddy build \\\n"
+            "    --with github.com/caddy-dns/namecheap\n"
+        )
+        self.assertEqual(parse_xcaddy_modules(path), [{"module": "github.com/caddy-dns/namecheap", "repo": "caddy-dns/namecheap"}])
+
     def test_ignores_other_run_lines(self):
         path = _write("RUN apk add --no-cache ca-certificates\nRUN xcaddy build --with github.com/a/b\n")
         self.assertEqual(parse_xcaddy_modules(path), [{"module": "github.com/a/b", "repo": "a/b"}])
