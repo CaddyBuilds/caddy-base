@@ -60,6 +60,15 @@ class ParseXcaddyModulesTest(unittest.TestCase):
         )
         self.assertEqual(parse_xcaddy_modules(path), [{"module": "github.com/caddy-dns/namecheap", "repo": "caddy-dns/namecheap"}])
 
+    def test_comment_line_inside_continued_run(self):
+        path = _write(
+            "RUN xcaddy build \\\n"
+            "    # the DNS provider\n"
+            "    --with github.com/caddy-dns/bunny \\\n"
+            "    --with github.com/mholt/caddy-ratelimit\n"
+        )
+        self.assertEqual([m["repo"] for m in parse_xcaddy_modules(path)], ["caddy-dns/bunny", "mholt/caddy-ratelimit"])
+
     def test_ignores_other_run_lines(self):
         path = _write("RUN apk add --no-cache ca-certificates\nRUN xcaddy build --with github.com/a/b\n")
         self.assertEqual(parse_xcaddy_modules(path), [{"module": "github.com/a/b", "repo": "a/b"}])

@@ -49,8 +49,14 @@ def parse_xcaddy_modules(path):
 
 
 def _run_commands(text):
-    """Yields each RUN instruction's shell text with line continuations joined."""
-    joined = re.sub(r"\\\s*\n", " ", text)
+    """Yields each RUN instruction's shell text with line continuations joined.
+
+    Dockerfile comment lines are dropped first (they may sit inside a continued RUN).
+    Shell comment handling is off in the tokenizer: ``#`` is common inside parameter
+    expansions such as ``${TARGETVARIANT#v}``.
+    """
+    without_comments = re.sub(r"(?m)^\s*#.*\n?", "", text)
+    joined = re.sub(r"\\\s*\n", " ", without_comments)
     for line in joined.splitlines():
         stripped = line.strip()
         if stripped.upper().startswith("RUN "):
@@ -59,7 +65,7 @@ def _run_commands(text):
 
 def _tokens(command):
     try:
-        return shlex.split(command, comments=True)
+        return shlex.split(command, comments=False)
     except ValueError:
         return command.split()
 
