@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - name: Unit tests
+        run: python -m unittest discover -s tests -t . -v
+        working-directory: scripts
+      - name: Dry run against the example repo
+        run: |
+          cp -r "$GITHUB_WORKSPACE/examples" /tmp/example-repo
+          cd /tmp/example-repo
+          PYTHONPATH="$GITHUB_WORKSPACE/scripts" GITHUB_REPOSITORY=caddybuilds/caddy-cloudflare \
+            python -m check_caddy_status --dry-run
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

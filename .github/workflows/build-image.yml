@@ -1,0 +1,299 @@
+# Reusable: builds an image repo's Dockerfile for every required platform and pushes it
+# to GHCR (always) and Docker Hub (when credentials exist). Repo-specific values come from
+# the caller's caddy-image.json; image names come from the caller's repository name.
+#
+# Caller:
+#   jobs:
+#     build:
+#       uses: CaddyBuilds/caddy-base/.github/workflows/build-image.yml@v1
+#       with:
+#         caddy_version: ${{ github.event.inputs.build_version || github.event.client_payload.caddy_version }}
+#         build_reason: ${{ github.event.client_payload.build_reason || 'manual' }}
+#         build_details: ${{ github.event.client_payload.build_details || '' }}
+#       secrets: inherit
+name: Build and Push Docker Image (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      caddy_version:
+        description: 'Caddy version to build (with or without v prefix, e.g., 2.8.0)'
+        required: true
+        type: string
+      build_reason:
+        description: 'Why this build was triggered (new_caddy_version/module_update/base_image_update/manual)'
+        required: false
+        type: string
+        default: ''
+      build_details:
+        description: 'What changed, e.g. module commits or republished base tags. Shown in release notes and image labels.'
+        required: false
+        type: string
+        default: ''
+      config_file:
+        description: 'Image config file in the caller repo'
+        required: false
+        type: string
+        default: caddy-image.json
+      dockerfile:
+        description: 'Dockerfile in the caller repo'
+        required: false
+        type: string
+        default: Dockerfile
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+      DOCKERHUB_REPOSITORY_NAME:
+        required: false
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  PLATFORMS: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le,linux/s390x
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Read image config
+        id: cfg
+        env:
+          CONFIG: ${{ inputs.config_file }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+        run: |
+          test -f "$CONFIG" || { echo "::error::Image config '$CONFIG' not found."; exit 1; }
+          test -f "$DOCKERFILE" || { echo "::error::Dockerfile '$DOCKERFILE' not found."; exit 1; }
+          for key in title description verify_module; do
+            value=$(jq -er --arg k "$key" '.[$k] // empty' "$CONFIG") || { echo "::error::'$key' missing in $CONFIG"; exit 1; }
+            echo "$key=$value" >> "$GITHUB_OUTPUT"
+          done
+          for key in alpine_alias:true slim:false create_release:true; do
+            name=${key%%:*}; default=${key##*:}
+            echo "$name=$(jq -r --arg k "$name" --argjson d "$default" 'if has($k) then .[$k] else $d end' "$CONFIG")" >> "$GITHUB_OUTPUT"
+          done
+          # Build the named "default" stage when the Dockerfile has one, else the last stage.
+          if grep -qiE '^\s*FROM\s.*\sAS\s+default\s*$' "$DOCKERFILE"; then
+            echo "default_target=default" >> "$GITHUB_OUTPUT"
+          else
+            echo "default_target=" >> "$GITHUB_OUTPUT"
+            if [ "$(jq -r '.slim // false' "$CONFIG")" = "true" ]; then
+              echo "::error::slim is enabled but '$DOCKERFILE' has no 'AS default' stage."; exit 1
+            fi
+          fi
+          echo "base_ref=${{ job.workflow_sha || github.job_workflow_sha }}" >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+        env:
+          user: ${{ secrets.DOCKERHUB_USERNAME }}
+          token: ${{ secrets.DOCKERHUB_TOKEN }}
+        if: ${{ env.user != '' && env.token != '' }}
+
+      - name: Set image names and version
+        env:
+          INPUT_VERSION: ${{ inputs.caddy_version }}
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DH_REPO: ${{ secrets.DOCKERHUB_REPOSITORY_NAME }}
+        run: |
+          REPO_OWNER=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          REPO_NAME=$(echo "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')
+          echo "REPO_OWNER=${REPO_OWNER}" >> $GITHUB_ENV
+          echo "REPO_NAME=${REPO_NAME}" >> $GITHUB_ENV
+          echo "GHCR_IMAGE=ghcr.io/${REPO_OWNER}/${REPO_NAME}" >> $GITHUB_ENV
+          VERSION="${INPUT_VERSION#v}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::No version specified."
+            exit 1
+          fi
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          if [ -n "$DH_USER" ] && [ -n "$DH_TOKEN" ]; then
+            echo "DOCKERHUB_IMAGE=${DH_REPO:-$DH_USER/$REPO_NAME}" >> $GITHUB_ENV
+          else
+            echo "Warning: DOCKERHUB_USERNAME or DOCKERHUB_TOKEN not set. Docker Hub image will not be pushed."
+          fi
+
+      # Defaults cover url, source, licenses, created, revision and version (suffix included).
+      # Labels feed `docker inspect`; GHCR reads a multi-arch image's description from the
+      # index annotations, so the overrides go in both.
+      - name: Docker metadata (default)
+        id: meta
+        uses: docker/metadata-action@v6
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: |
+            ${{ env.GHCR_IMAGE }}
+            ${{ env.DOCKERHUB_IMAGE }}
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.VERSION }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.VERSION }}
+            type=semver,pattern={{major}},value=${{ env.VERSION }}
+            type=semver,pattern={{version}},value=${{ env.VERSION }},suffix=-alpine,enable=${{ steps.cfg.outputs.alpine_alias == 'true' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.VERSION }},suffix=-alpine,enable=${{ steps.cfg.outputs.alpine_alias == 'true' }}
+            type=semver,pattern={{major}},value=${{ env.VERSION }},suffix=-alpine,enable=${{ steps.cfg.outputs.alpine_alias == 'true' }}
+            type=raw,value=alpine,enable=${{ steps.cfg.outputs.alpine_alias == 'true' }}
+          labels: |
+            org.opencontainers.image.title=${{ steps.cfg.outputs.title }}
+            org.opencontainers.image.description=${{ steps.cfg.outputs.description }}
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+            caddy-build.reason=${{ inputs.build_reason || 'manual' }}
+            caddy-build.details=${{ inputs.build_details }}
+            caddy-build.base-workflow=${{ steps.cfg.outputs.base_ref }}
+          annotations: |
+            org.opencontainers.image.title=${{ steps.cfg.outputs.title }}
+            org.opencontainers.image.description=${{ steps.cfg.outputs.description }}
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+            caddy-build.reason=${{ inputs.build_reason || 'manual' }}
+            caddy-build.details=${{ inputs.build_details }}
+            caddy-build.base-workflow=${{ steps.cfg.outputs.base_ref }}
+
+      - name: Build and push (default)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ inputs.dockerfile }}
+          target: ${{ steps.cfg.outputs.default_target }}
+          push: true
+          build-args: |
+            CADDY_VERSION=${{ env.VERSION }}
+          platforms: ${{ env.PLATFORMS }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+
+      - name: Verify (default)
+        env:
+          IMAGE: ${{ env.GHCR_IMAGE }}:${{ env.VERSION }}
+          MODULE: ${{ steps.cfg.outputs.verify_module }}
+        run: |
+          echo "Pulling ${IMAGE}..."
+          docker pull "${IMAGE}"
+          docker run --rm "${IMAGE}" caddy version
+          echo "Checking ${MODULE} is loaded..."
+          docker run --rm "${IMAGE}" caddy list-modules | grep -q "${MODULE}"
+          echo "Build verification passed."
+
+      # The slim target shares the builder stage, so the compile is reused from the
+      # build above and only the final stage is assembled here.
+      - name: Docker metadata (slim)
+        id: meta_slim
+        if: ${{ steps.cfg.outputs.slim == 'true' }}
+        uses: docker/metadata-action@v6
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: |
+            ${{ env.GHCR_IMAGE }}
+            ${{ env.DOCKERHUB_IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}},value=${{ env.VERSION }},suffix=-slim
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.VERSION }},suffix=-slim
+            type=semver,pattern={{major}},value=${{ env.VERSION }},suffix=-slim
+            type=raw,value=slim
+          labels: |
+            org.opencontainers.image.title=${{ steps.cfg.outputs.title }} (slim)
+            org.opencontainers.image.description=${{ steps.cfg.outputs.description }} (slim variant)
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+            caddy-build.reason=${{ inputs.build_reason || 'manual' }}
+            caddy-build.details=${{ inputs.build_details }}
+            caddy-build.base-workflow=${{ steps.cfg.outputs.base_ref }}
+          annotations: |
+            org.opencontainers.image.title=${{ steps.cfg.outputs.title }} (slim)
+            org.opencontainers.image.description=${{ steps.cfg.outputs.description }} (slim variant)
+            org.opencontainers.image.vendor=${{ github.repository_owner }}
+            caddy-build.reason=${{ inputs.build_reason || 'manual' }}
+            caddy-build.details=${{ inputs.build_details }}
+            caddy-build.base-workflow=${{ steps.cfg.outputs.base_ref }}
+
+      - name: Build and push (slim)
+        if: ${{ steps.cfg.outputs.slim == 'true' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ inputs.dockerfile }}
+          target: slim
+          push: true
+          build-args: |
+            CADDY_VERSION=${{ env.VERSION }}
+          platforms: ${{ env.PLATFORMS }}
+          tags: ${{ steps.meta_slim.outputs.tags }}
+          labels: ${{ steps.meta_slim.outputs.labels }}
+          annotations: ${{ steps.meta_slim.outputs.annotations }}
+
+      - name: Verify (slim)
+        if: ${{ steps.cfg.outputs.slim == 'true' }}
+        env:
+          IMAGE: ${{ env.GHCR_IMAGE }}:${{ env.VERSION }}-slim
+          MODULE: ${{ steps.cfg.outputs.verify_module }}
+        run: |
+          docker pull "${IMAGE}"
+          docker run --rm "${IMAGE}" caddy version
+          docker run --rm "${IMAGE}" caddy list-modules | grep -q "${MODULE}"
+          echo "Slim verification passed."
+
+      # New version: create its release. Rebuild of an existing version: append a dated
+      # line under "Rebuilds" so a changed digest can be traced back to its cause.
+      - name: Create or update GitHub Release
+        if: ${{ steps.cfg.outputs.create_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REASON: ${{ inputs.build_reason || 'manual' }}
+          DETAILS: ${{ inputs.build_details }}
+          DESCRIPTION: ${{ steps.cfg.outputs.description }}
+        run: |
+          if ! body=$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json body --jq .body 2>/dev/null); then
+            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" \
+              --title "Caddy v$VERSION" \
+              --notes "$DESCRIPTION, built from Caddy v$VERSION. See the full release notes [here](https://github.com/caddyserver/caddy/releases/tag/v$VERSION)."
+            exit 0
+          fi
+          case "$body" in *"## Rebuilds"*) ;; *) body="$(printf '%s\n\n## Rebuilds\n' "$body")" ;; esac
+          line="- $(date -u +%Y-%m-%d): ${REASON//_/ }${DETAILS:+ — $DETAILS}"
+          printf '%s\n%s\n' "$body" "$line" | gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --notes-file -
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v9
+        env:
+          VERSION: ${{ env.VERSION || inputs.caddy_version }}
+          REASON: ${{ inputs.build_reason || 'manual' }}
+        with:
+          script: |
+            const { VERSION: version, REASON: reason } = process.env;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Build failed: Caddy v${version}`,
+              body: `The automated build failed.\n\n- **Version:** ${version}\n- **Reason:** ${reason}\n- **Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['build-failure']
+            });
