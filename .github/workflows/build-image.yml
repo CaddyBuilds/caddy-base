@@ -189,18 +189,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
 
-      - name: Verify (default)
-        env:
-          IMAGE: ${{ env.GHCR_IMAGE }}:${{ env.VERSION }}
-          MODULE: ${{ steps.cfg.outputs.verify_module }}
-        run: |
-          echo "Pulling ${IMAGE}..."
-          docker pull "${IMAGE}"
-          docker run --rm "${IMAGE}" caddy version
-          echo "Checking ${MODULE} is loaded..."
-          docker run --rm "${IMAGE}" caddy list-modules | grep -q "${MODULE}"
-          echo "Build verification passed."
-
       # The slim target shares the builder stage, so the compile is reused from the
       # build above and only the final stage is assembled here.
       - name: Docker metadata (slim)
@@ -250,16 +238,36 @@ jobs:
           labels: ${{ steps.meta_slim.outputs.labels }}
           annotations: ${{ steps.meta_slim.outputs.annotations }}
 
-      - name: Verify (slim)
-        if: ${{ steps.cfg.outputs.slim == 'true' }}
+      # Pull and run each platform's image under QEMU: a binary that is broken on one
+      # architecture must fail the build, not ship. Covers the slim variant when enabled.
+      - name: Verify pushed images on every platform
         env:
-          IMAGE: ${{ env.GHCR_IMAGE }}:${{ env.VERSION }}-slim
           MODULE: ${{ steps.cfg.outputs.verify_module }}
+          SLIM: ${{ steps.cfg.outputs.slim }}
         run: |
-          docker pull "${IMAGE}"
-          docker run --rm "${IMAGE}" caddy version
-          docker run --rm "${IMAGE}" caddy list-modules | grep -q "${MODULE}"
-          echo "Slim verification passed."
+          images="${GHCR_IMAGE}:${VERSION}"
+          [ "$SLIM" = "true" ] && images="$images ${GHCR_IMAGE}:${VERSION}-slim"
+          failed=""
+          for image in $images; do
+            for platform in $(echo "$PLATFORMS" | tr ',' ' '); do
+              echo "::group::${image} ${platform}"
+              if docker pull --quiet --platform "$platform" "$image" >/dev/null \
+                 && out=$(docker run --rm --platform "$platform" "$image" sh -c 'caddy version && caddy list-modules') \
+                 && echo "$out" | head -n1 \
+                 && echo "$out" | grep -q "$MODULE"; then
+                echo "ok: ${MODULE} present"
+              else
+                echo "::error::${image} on ${platform} failed verification"
+                failed="$failed ${image}@${platform}"
+              fi
+              echo "::endgroup::"
+            done
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::Verification failed for:$failed"
+            exit 1
+          fi
+          echo "All images verified on: $PLATFORMS"
 
       # New version: create its release. Rebuild of an existing version: append a dated
       # line under "Rebuilds" so a changed digest can be traced back to its cause.
