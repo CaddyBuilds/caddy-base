@@ -1,6 +1,7 @@
-# Reusable: builds an image repo's Dockerfile for every required platform and pushes it
-# to GHCR (always) and Docker Hub (when credentials exist). Repo-specific values come from
-# the caller's caddy-image.json; image names come from the caller's repository name.
+# Reusable: builds an image repo's Dockerfile for every platform it ships and pushes it
+# to GHCR (always) and Docker Hub (when credentials exist). Repo-specific values, the
+# platform list included, come from the caller's caddy-image.json; image names come from
+# the caller's repository name.
 #
 # Caller:
 #   jobs:
@@ -40,6 +41,11 @@ on:
         required: false
         type: string
         default: Dockerfile
+      base_repository:
+        description: 'Repository that hosts this workflow and the config loader (override in forks of caddy-base)'
+        required: false
+        type: string
+        default: CaddyBuilds/caddy-base
     secrets:
       DOCKERHUB_USERNAME:
         required: false
@@ -52,9 +58,6 @@ permissions:
   contents: write
   packages: write
 
-env:
-  PLATFORMS: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le,linux/s390x
-
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -62,6 +65,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      # The config schema (keys, defaults, allowed platforms) lives in the Python package
+      # next to this workflow, so the loader is checked out at this same commit and the
+      # checker and the build can never disagree. Removed again to keep the build context clean.
+      - name: Checkout caddy-base
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.base_repository }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .caddy-base
 
       - name: Read image config
         id: cfg
@@ -71,24 +84,20 @@ jobs:
         run: |
           test -f "$CONFIG" || { echo "::error::Image config '$CONFIG' not found."; exit 1; }
           test -f "$DOCKERFILE" || { echo "::error::Dockerfile '$DOCKERFILE' not found."; exit 1; }
-          for key in title description verify_module; do
-            value=$(jq -er --arg k "$key" '.[$k] // empty' "$CONFIG") || { echo "::error::'$key' missing in $CONFIG"; exit 1; }
-            echo "$key=$value" >> "$GITHUB_OUTPUT"
-          done
-          for key in alpine_alias:true slim:false create_release:true; do
-            name=${key%%:*}; default=${key##*:}
-            echo "$name=$(jq -r --arg k "$name" --argjson d "$default" 'if has($k) then .[$k] else $d end' "$CONFIG")" >> "$GITHUB_OUTPUT"
-          done
+          PYTHONPATH=.caddy-base/scripts python3 -m check_caddy_status.image_config "$CONFIG" > "$RUNNER_TEMP/image-config.env"
+          cat "$RUNNER_TEMP/image-config.env" >> "$GITHUB_OUTPUT"
+          slim=$(sed -n 's/^slim=//p' "$RUNNER_TEMP/image-config.env")
           # Build the named "default" stage when the Dockerfile has one, else the last stage.
           if grep -qiE '^\s*FROM\s.*\sAS\s+default\s*$' "$DOCKERFILE"; then
             echo "default_target=default" >> "$GITHUB_OUTPUT"
           else
             echo "default_target=" >> "$GITHUB_OUTPUT"
-            if [ "$(jq -r '.slim // false' "$CONFIG")" = "true" ]; then
+            if [ "$slim" = "true" ]; then
               echo "::error::slim is enabled but '$DOCKERFILE' has no 'AS default' stage."; exit 1
             fi
           fi
           echo "base_ref=${{ job.workflow_sha || github.job_workflow_sha }}" >> "$GITHUB_OUTPUT"
+          rm -rf .caddy-base
           cat "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
@@ -184,7 +193,7 @@ jobs:
           push: true
           build-args: |
             CADDY_VERSION=${{ env.VERSION }}
-          platforms: ${{ env.PLATFORMS }}
+          platforms: ${{ steps.cfg.outputs.platforms }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
@@ -233,7 +242,7 @@ jobs:
           push: true
           build-args: |
             CADDY_VERSION=${{ env.VERSION }}
-          platforms: ${{ env.PLATFORMS }}
+          platforms: ${{ steps.cfg.outputs.platforms }}
           tags: ${{ steps.meta_slim.outputs.tags }}
           labels: ${{ steps.meta_slim.outputs.labels }}
           annotations: ${{ steps.meta_slim.outputs.annotations }}
@@ -244,6 +253,7 @@ jobs:
         env:
           MODULE: ${{ steps.cfg.outputs.verify_module }}
           SLIM: ${{ steps.cfg.outputs.slim }}
+          PLATFORMS: ${{ steps.cfg.outputs.platforms }}
         run: |
           images="${GHCR_IMAGE}:${VERSION}"
           [ "$SLIM" = "true" ] && images="$images ${GHCR_IMAGE}:${VERSION}-slim"

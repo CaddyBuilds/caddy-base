@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .base_image import check_base_image_updates
-from .config import CUSTOM_IMAGE, GHCR_IMAGE, OFFICIAL_CADDY_IMAGE, REQUIRED_PLATFORMS
+from .config import CUSTOM_IMAGE, GHCR_IMAGE, OFFICIAL_CADDY_IMAGE
 from .docker_hub import check_docker_hub_tag, get_platforms_from_tag_data
 from .dockerfile import DockerfileError, parse_xcaddy_modules
 from .ghcr import check_ghcr_tag
@@ -39,9 +39,6 @@ def main():
     if dry_run:
         log.info("*** DRY-RUN MODE — no outputs will be set, no files written ***")
 
-    if not REQUIRED_PLATFORMS:
-        log.error("Configuration error: REQUIRED_PLATFORMS set is empty.")
-        sys.exit(1)
     if not GHCR_IMAGE and not CUSTOM_IMAGE:
         log.error("Configuration error: set GITHUB_REPOSITORY, GHCR_IMAGE, or DOCKERHUB_REPOSITORY_NAME.")
         sys.exit(1)
@@ -54,10 +51,11 @@ def main():
         log.error(f"Configuration error: {e}")
         sys.exit(1)
     versions_file = root / args.versions_file
+    platforms = set(image.platforms)
 
     log.info(f"Image: {image.title} — {image.description}")
     log.info(f"Modules: {', '.join(m['module'] for m in modules)}")
-    log.info(f"Required platforms: {REQUIRED_PLATFORMS}")
+    log.info(f"Platforms: {', '.join(image.platforms)}")
     log.info(f"GHCR image: {GHCR_IMAGE or '(not set)'}")
     log.info(f"Docker Hub image: {CUSTOM_IMAGE or '(not set)'}")
 
@@ -68,7 +66,7 @@ def main():
 
     # Step 1: Check official Caddy image on Docker Hub
     log.info(f"\nStep 1: Checking official image '{OFFICIAL_CADDY_IMAGE}:{docker_tag}'...")
-    official_image_ready = _check_official_image(docker_tag)
+    official_image_ready = _check_official_image(docker_tag, platforms)
 
     if not official_image_ready:
         log.info("Result: Official image is not ready. No build triggered.")
@@ -79,7 +77,7 @@ def main():
 
     # Step 2: Check custom image on GHCR + Docker Hub
     log.info(f"\nStep 2: Checking custom image status...")
-    custom_image_complete = _check_custom_image(docker_tag)
+    custom_image_complete = _check_custom_image(docker_tag, platforms)
 
     # Step 3: Check module updates
     log.info(f"\nStep 3: Checking module updates...")
@@ -96,7 +94,7 @@ def main():
     base_details = []
     if custom_image_complete and not modules_changed:
         log.info(f"\nStep 4: Checking official base image updates...")
-        base_details = check_base_image_updates(docker_tag, image.official_variant_suffixes)
+        base_details = check_base_image_updates(docker_tag, image.official_variant_suffixes, platforms)
 
     # Final decision
     needs_build = False
@@ -123,14 +121,14 @@ def main():
     log.info(f"\n--- Check finished at {end_time.isoformat()} (Duration: {end_time - start_time}) ---")
 
 
-def _check_official_image(docker_tag):
-    """Returns True if the official Caddy image has all required platforms."""
+def _check_official_image(docker_tag, platforms):
+    """Returns True if the official Caddy image has every platform we ship."""
     result, data = check_docker_hub_tag(OFFICIAL_CADDY_IMAGE, docker_tag)
 
     if result == TagCheckResult.FOUND:
-        found = get_platforms_from_tag_data(data)
+        found = get_platforms_from_tag_data(data, platforms)
         log.info(f"  Found platforms: {found or '{}'}")
-        missing = REQUIRED_PLATFORMS - found
+        missing = platforms - found
         if not missing:
             log.info("  Official image has all required platforms.")
             log.set_summary("Official Image", "Ready (all platforms)")
@@ -147,18 +145,18 @@ def _check_official_image(docker_tag):
     return False
 
 
-def _check_custom_image(docker_tag):
-    """Returns True if the custom image exists with all platforms on GHCR or Docker Hub."""
+def _check_custom_image(docker_tag, platforms):
+    """Returns True if the custom image exists with every platform we ship on GHCR or Docker Hub."""
     custom_complete = False
     ghcr_result = None
 
     # GHCR (primary)
     if GHCR_IMAGE:
         log.info(f"  Checking GHCR: ghcr.io/{GHCR_IMAGE}:{docker_tag}")
-        ghcr_result, ghcr_data = check_ghcr_tag(GHCR_IMAGE, docker_tag)
+        ghcr_result, ghcr_data = check_ghcr_tag(GHCR_IMAGE, docker_tag, platforms)
 
         if ghcr_result == TagCheckResult.FOUND:
-            missing = REQUIRED_PLATFORMS - ghcr_data
+            missing = platforms - ghcr_data
             if not missing:
                 custom_complete = True
                 log.info("  GHCR image complete.")
@@ -182,8 +180,8 @@ def _check_custom_image(docker_tag):
         dh_result, dh_data = check_docker_hub_tag(CUSTOM_IMAGE, docker_tag)
 
         if dh_result == TagCheckResult.FOUND:
-            dh_platforms = get_platforms_from_tag_data(dh_data)
-            dh_missing = REQUIRED_PLATFORMS - dh_platforms
+            dh_platforms = get_platforms_from_tag_data(dh_data, platforms)
+            dh_missing = platforms - dh_platforms
             if not dh_missing:
                 log.info("  Docker Hub image complete.")
                 log.set_summary("Custom (Docker Hub)", "Complete")

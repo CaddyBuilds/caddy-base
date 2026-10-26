@@ -5,27 +5,26 @@ Caddy release. Rebuilding on top of them picks those fixes up.
 """
 
 from .config import CUSTOM_IMAGE, GHCR_IMAGE, OFFICIAL_CADDY_IMAGE
-from .docker_hub import check_docker_hub_tag, get_images_by_platform
+from .docker_hub import get_docker_hub_pushed
 from .ghcr import get_ghcr_created
-from .http_client import TagCheckResult
 from .logger import log
-from .timeutil import parse_timestamp
 
 
-def check_base_image_updates(docker_tag, variant_suffixes):
+def check_base_image_updates(docker_tag, variant_suffixes, platforms):
     """Returns descriptions of variants whose official image is newer than our build (empty if none).
 
     Args:
         docker_tag: Caddy version without the ``v`` prefix.
         variant_suffixes: our tag suffixes that are built FROM ``library/caddy`` (e.g. ``["", "-alpine"]``).
+        platforms: the platforms we ship; pushes of other platforms are ignored.
     """
     stale = []
     unknown = []
 
     for suffix in variant_suffixes:
         tag = f"{docker_tag}{suffix}"
-        official = _docker_hub_pushed(OFFICIAL_CADDY_IMAGE, tag)
-        ours = _custom_build_time(tag)
+        official = get_docker_hub_pushed(OFFICIAL_CADDY_IMAGE, tag, platforms)
+        ours = _custom_build_time(tag, platforms)
 
         if official is None or ours is None:
             log.warn(f"  Could not compare '{tag}' (official: {official}, ours: {ours}), skipping.")
@@ -46,7 +45,7 @@ def check_base_image_updates(docker_tag, variant_suffixes):
     return stale
 
 
-def _custom_build_time(tag):
+def _custom_build_time(tag, platforms):
     """Returns when our image was built.
 
     GHCR is preferred because the image config's ``created`` is the build time. Docker Hub
@@ -58,19 +57,5 @@ def _custom_build_time(tag):
         if created:
             return created
     if CUSTOM_IMAGE:
-        return _docker_hub_pushed(CUSTOM_IMAGE, tag)
+        return get_docker_hub_pushed(CUSTOM_IMAGE, tag, platforms)
     return None
-
-
-def _docker_hub_pushed(image_name, tag):
-    """Returns the most recent push among the tag's required platforms, or None.
-
-    The tag-level ``last_updated`` also moves when platforms we don't ship (Windows,
-    riscv64) are re-pushed, which would trigger needless rebuilds.
-    """
-    result, data = check_docker_hub_tag(image_name, tag)
-    if result != TagCheckResult.FOUND:
-        return None
-    pushed = [parse_timestamp(img.get("last_pushed")) for img in get_images_by_platform(data).values()]
-    pushed = [p for p in pushed if p]
-    return max(pushed) if pushed else None

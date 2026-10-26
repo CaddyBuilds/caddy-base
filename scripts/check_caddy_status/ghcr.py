@@ -2,9 +2,9 @@ import json
 
 import requests
 
-from .config import REQUIRED_PLATFORMS
 from .http_client import TagCheckResult, request_with_retry
 from .logger import log
+from .platforms import platform_string
 from .timeutil import parse_timestamp
 
 INDEX_ACCEPT = (
@@ -45,8 +45,8 @@ def _get_pull_token(image_name):
         return None, f"GHCR token request failed: {e}"
 
 
-def check_ghcr_tag(image_name, tag):
-    """Checks if a tag exists on GHCR and returns its platforms.
+def check_ghcr_tag(image_name, tag, platforms):
+    """Checks if a tag exists on GHCR and returns which of the wanted platforms it has.
 
     Returns:
         tuple: (TagCheckResult, platforms_set_or_error_msg)
@@ -65,23 +65,14 @@ def check_ghcr_tag(image_name, tag):
         if resp.status_code != 200:
             return TagCheckResult.ERROR, f"GHCR manifest status {resp.status_code}"
 
-        data = resp.json()
-        platforms = set()
-        for m in data.get("manifests", []):
+        found = set()
+        for m in resp.json().get("manifests", []):
             p = m.get("platform", {})
-            os_name = p.get("os")
-            arch = p.get("architecture")
-            variant = p.get("variant")
-            if os_name != "linux" or not arch:
-                continue
-            if arch == "arm" and variant == "v7":
-                platform_str = f"{os_name}/{arch}/{variant}"
-            else:
-                platform_str = f"{os_name}/{arch}"
-            if platform_str in REQUIRED_PLATFORMS:
-                platforms.add(platform_str)
+            platform = platform_string(p.get("os"), p.get("architecture"), p.get("variant"))
+            if platform in platforms:
+                found.add(platform)
 
-        return TagCheckResult.FOUND, platforms
+        return TagCheckResult.FOUND, found
     except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
         return TagCheckResult.ERROR, f"GHCR manifest request failed: {e}"
 
