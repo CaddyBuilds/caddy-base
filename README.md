@@ -51,7 +51,8 @@ emulated; only the final `COPY` stage runs per platform. See [`examples/Dockerfi
   "verify_module": "dns.providers.cloudflare",
   "alpine_alias": true,
   "slim": false,
-  "create_release": true
+  "create_release": true,
+  "platforms": ["linux/amd64", "linux/arm64", "linux/arm/v7", "linux/ppc64le", "linux/s390x"]
 }
 ```
 
@@ -63,6 +64,10 @@ emulated; only the final `COPY` stage runs per platform. See [`examples/Dockerfi
 | `alpine_alias` | no | `true` | Also push `X.Y.Z-alpine`, `X.Y-alpine`, `X-alpine` and `alpine` as aliases of the default image |
 | `slim` | no | `false` | Also build the Dockerfile's `slim` stage and push `X.Y.Z-slim`, `X.Y-slim`, `X-slim`, `slim` |
 | `create_release` | no | `true` | Create a GitHub Release per Caddy version and append rebuild notes to it |
+| `platforms` | no | the five above | Platforms to build, verify and require upstream. Any non-empty subset of what the official image publishes: `linux/amd64`, `linux/arm64`, `linux/arm/v6`, `linux/arm/v7`, `linux/ppc64le`, `linux/riscv64`, `linux/s390x` |
+
+The schema lives in `scripts/check_caddy_status/image_config.py`; the build workflow runs
+that module to read the file, so the checker and the build always agree on it.
 
 **Two caller workflows**, copied from [`examples/.github/workflows/`](examples/.github/workflows/):
 
@@ -91,10 +96,10 @@ Docker Hub is used when `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets exist
 
 ## How the check decides to build
 
-1. Fetch the latest Caddy release and confirm the official image has every required platform.
+1. Fetch the latest Caddy release and confirm the official image has every platform we ship.
 2. If our image for that version is missing a platform on GHCR, build (`new_caddy_version`).
 3. Compare each module's latest commit with `module-versions.json`; on change, build (`module_update`) and commit the new state.
-4. Compare the official image's push time with our build time; if upstream republished, build (`base_image_update`).
+4. Compare the official image's push time (for the platforms we ship) with our build time; if upstream republished, build (`base_image_update`).
 
 The reason and details are passed to the build and recorded in the image labels
 (`caddy-build.reason`, `caddy-build.details`, `caddy-build.base-workflow`) and the release notes.

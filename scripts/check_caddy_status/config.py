@@ -1,7 +1,7 @@
 """Environment-derived settings shared by every image repo.
 
-Repo-specific values (title, modules, variants) come from the image config file and the
-Dockerfile, loaded at runtime — see ``image_config`` and ``dockerfile``.
+Repo-specific values (title, modules, variants, platforms) come from the image config file
+and the Dockerfile, loaded at runtime — see ``image_config`` and ``dockerfile``.
 """
 
 import os
@@ -20,15 +20,6 @@ CUSTOM_IMAGE = os.environ.get("DOCKERHUB_REPOSITORY_NAME", "") or _github_reposi
 
 # GHCR — always matches the GitHub repo
 GHCR_IMAGE = os.environ.get("GHCR_IMAGE", "") or _github_repository
-
-# Platforms required in both official and custom images
-REQUIRED_PLATFORMS = {
-    "linux/amd64",
-    "linux/arm64",
-    "linux/arm/v7",
-    "linux/ppc64le",
-    "linux/s390x",
-}
 
 # HTTP retry settings
 MAX_RETRIES = 3
