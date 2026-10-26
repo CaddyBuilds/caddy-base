@@ -26,10 +26,12 @@ workflows, so a fix lands in every repo on its next run.
 An image repo needs four files besides its README.
 
 **`Dockerfile`**, complete and buildable on its own. The checker reads the modules from the
-`xcaddy build` line, so this is the only place they are listed. Name the final stage
-`default`. A `slim` stage is optional: `FROM ghcr.io/caddybuilds/caddy-base:latest`, copy the
-binary from the builder and `setcap` it (see [`examples/Dockerfile`](examples/Dockerfile));
-the checker reads the slim base from that `FROM` line.
+`xcaddy build` line, so this is the only place they are listed. Name the main stage
+`default` and keep it last, so a plain `docker build .` produces it. A `slim` stage is
+optional: `FROM ghcr.io/caddybuilds/caddy-base:latest` and copy the binary from the builder
+(see [`examples/Dockerfile`](examples/Dockerfile)). The checker reads the slim base from that
+`FROM` line. The build workflow builds each stage by name, and slim only when the config
+enables it.
 
 ```dockerfile
 ARG CADDY_VERSION
