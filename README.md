@@ -75,7 +75,9 @@ emulated; only the final `COPY` stage runs per platform. See [`examples/Dockerfi
 The schema lives in `scripts/check_caddy_status/image_config.py`; the build workflow runs
 that module to read the file, so the checker and the build always agree on it.
 
-**Two caller workflows**, copied from [`examples/.github/workflows/`](examples/.github/workflows/):
+**Two caller workflows**, copied from [`examples/.github/workflows/`](examples/.github/workflows/).
+A manual build takes an optional `note`, recorded in the release notes and the
+`caddy-build.details` label so a rebuild can be traced to its cause:
 
 ```yaml
 jobs:
@@ -84,7 +86,7 @@ jobs:
     with:
       caddy_version: ${{ github.event.inputs.build_version || github.event.client_payload.caddy_version }}
       build_reason: ${{ github.event.client_payload.build_reason || 'manual' }}
-      build_details: ${{ github.event.client_payload.build_details || '' }}
+      build_details: ${{ github.event.inputs.note || github.event.client_payload.build_details || '' }}
     secrets: inherit
 ```
 
