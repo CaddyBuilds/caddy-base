@@ -1,22 +1,13 @@
-"""Reads what the checks need from a Dockerfile: the ``xcaddy build`` module list and the
-base image of every ``FROM`` stage.
+"""Reads the module list from the Dockerfile's ``xcaddy build`` command.
 
-The Dockerfile is the single source of truth for both, so forks only edit it and the
-daily check follows.
+The Dockerfile is the single source of truth for which modules an image contains, so
+forks only edit the ``--with`` lines and the daily check follows.
 """
 
 import re
 import shlex
-from typing import NamedTuple
 
 _WITH_RE = re.compile(r"^--with(?:=(.+))?$")
-_INSTRUCTION_RE = re.compile(r"^([A-Za-z]+)\s+(.*)$")
-_VAR_RE = re.compile(r"\$\{(\w+)(?:[:#%/^,+-][^}]*)?\}|\$(\w+)")
-
-
-class Stage(NamedTuple):
-    name: str  # None for an unnamed stage
-    image: str  # base image reference with $ARG references expanded
 
 
 class DockerfileError(ValueError):
@@ -57,65 +48,19 @@ def parse_xcaddy_modules(path):
     return modules
 
 
-def parse_stages(path, build_args=None):
-    """Returns the ``FROM`` instructions as ``[Stage(name, image)]``.
-
-    ``$ARG`` references in the image are expanded from the Dockerfile's own ``ARG NAME=default``
-    lines, overridden by ``build_args``; an undefined ARG expands to nothing, as in Docker.
-    Flags such as ``--platform`` are dropped.
-    """
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
-    except OSError as e:
-        raise DockerfileError(f"Cannot read Dockerfile '{path}': {e}") from e
-
-    args = {}
-    stages = []
-    for keyword, rest in _instructions(text):
-        if keyword == "ARG":
-            for token in rest.split():
-                name, has_default, default = token.partition("=")
-                if has_default or name not in args:
-                    args[name] = default
-        elif keyword == "FROM":
-            tokens = [t for t in rest.split() if not t.startswith("--")]
-            if not tokens:
-                raise DockerfileError(f"Malformed FROM in '{path}': {rest}")
-            name = tokens[2] if len(tokens) >= 3 and tokens[1].upper() == "AS" else None
-            stages.append(Stage(name, _expand(tokens[0], {**args, **(build_args or {})})))
-
-    if not stages:
-        raise DockerfileError(f"No FROM instruction found in '{path}'")
-    return stages
-
-
-def _expand(text, values):
-    return _VAR_RE.sub(lambda m: values.get(m.group(1) or m.group(2), ""), text)
-
-
-def _instructions(text):
-    """Yields ``(KEYWORD, rest)`` for each instruction with line continuations joined.
+def _run_commands(text):
+    """Yields each RUN instruction's shell text with line continuations joined.
 
     Dockerfile comment lines are dropped first (they may sit inside a continued RUN).
+    Shell comment handling is off in the tokenizer: ``#`` is common inside parameter
+    expansions such as ``${TARGETVARIANT#v}``.
     """
     without_comments = re.sub(r"(?m)^\s*#.*\n?", "", text)
     joined = re.sub(r"\\\s*\n", " ", without_comments)
     for line in joined.splitlines():
-        m = _INSTRUCTION_RE.match(line.strip())
-        if m:
-            yield m.group(1).upper(), m.group(2).strip()
-
-
-def _run_commands(text):
-    """Yields each RUN instruction's shell text.
-
-    Shell comment handling is off in the tokenizer: ``#`` is common inside parameter
-    expansions such as ``${TARGETVARIANT#v}``.
-    """
-    for keyword, rest in _instructions(text):
-        if keyword == "RUN":
-            yield rest
+        stripped = line.strip()
+        if stripped.upper().startswith("RUN "):
+            yield stripped[4:]
 
 
 def _tokens(command):

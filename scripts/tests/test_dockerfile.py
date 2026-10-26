@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from check_caddy_status.dockerfile import DockerfileError, Stage, parse_stages, parse_xcaddy_modules
+from check_caddy_status.dockerfile import DockerfileError, parse_xcaddy_modules
 
 
 def _write(text):
@@ -81,53 +81,6 @@ class ParseXcaddyModulesTest(unittest.TestCase):
     def test_missing_file_is_an_error(self):
         with self.assertRaises(DockerfileError):
             parse_xcaddy_modules("/nonexistent/Dockerfile")
-
-
-class ParseStagesTest(unittest.TestCase):
-    IMAGE_REPO = (
-        "ARG CADDY_VERSION\n"
-        "FROM --platform=$BUILDPLATFORM caddy:${CADDY_VERSION}-builder AS builder\n"
-        "ARG TARGETOS TARGETARCH TARGETVARIANT\n"
-        "RUN GOARM=${TARGETVARIANT#v} xcaddy build --with github.com/caddy-dns/bunny\n"
-        "\n"
-        "# Default image\n"
-        "FROM caddy:${CADDY_VERSION} AS default\n"
-        "COPY --from=builder /usr/bin/caddy /usr/bin/caddy\n"
-        "\n"
-        "FROM ghcr.io/caddybuilds/caddy-base:latest as slim\n"
-        "COPY --from=builder /usr/bin/caddy /usr/bin/caddy\n"
-        "RUN setcap cap_net_bind_service=+ep /usr/bin/caddy\n"
-    )
-
-    def test_named_stages_with_build_arg(self):
-        stages = parse_stages(_write(self.IMAGE_REPO), {"CADDY_VERSION": "2.11.7"})
-        self.assertEqual(
-            stages,
-            [
-                Stage("builder", "caddy:2.11.7-builder"),
-                Stage("default", "caddy:2.11.7"),
-                Stage("slim", "ghcr.io/caddybuilds/caddy-base:latest"),
-            ],
-        )
-
-    def test_undefined_arg_expands_to_nothing(self):
-        self.assertEqual(parse_stages(_write(self.IMAGE_REPO))[1].image, "caddy:")
-
-    def test_arg_default_and_override(self):
-        text = "ARG ALPINE=3.23\nARG OTHER\nFROM alpine:$ALPINE\nFROM alpine:${ALPINE} AS second\n"
-        self.assertEqual(parse_stages(_write(text)), [Stage(None, "alpine:3.23"), Stage("second", "alpine:3.23")])
-        self.assertEqual(parse_stages(_write(text), {"ALPINE": "3.22"})[0].image, "alpine:3.22")
-
-    def test_plain_base_dockerfile(self):
-        self.assertEqual(parse_stages(_write("# comment\nFROM alpine:3.23\nRUN apk add --no-cache libcap\n"))[0], Stage(None, "alpine:3.23"))
-
-    def test_no_from_is_an_error(self):
-        with self.assertRaises(DockerfileError):
-            parse_stages(_write("RUN echo hi\n"))
-
-    def test_missing_file_is_an_error(self):
-        with self.assertRaises(DockerfileError):
-            parse_stages("/nonexistent/Dockerfile")
 
 
 if __name__ == "__main__":
