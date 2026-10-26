@@ -15,7 +15,7 @@ from pathlib import Path
 from .base_image import check_base_image_updates
 from .config import CUSTOM_IMAGE, GHCR_IMAGE, OFFICIAL_CADDY_IMAGE
 from .docker_hub import check_docker_hub_tag, get_platforms_from_tag_data
-from .dockerfile import DockerfileError, parse_xcaddy_modules
+from .dockerfile import DockerfileError, parse_stages, parse_xcaddy_modules
 from .ghcr import check_ghcr_tag
 from .github_api import get_latest_caddy_release
 from .http_client import TagCheckResult
@@ -44,9 +44,12 @@ def main():
         sys.exit(1)
 
     root = Path(args.repo_root)
+    dockerfile = root / args.dockerfile
     try:
         image = load_image_config(root / args.config)
-        modules = parse_xcaddy_modules(root / args.dockerfile)
+        modules = parse_xcaddy_modules(dockerfile)
+        if image.slim and "slim" not in {s.name for s in parse_stages(dockerfile)}:
+            raise DockerfileError(f"slim is enabled but '{dockerfile}' has no 'AS slim' stage")
     except (ImageConfigError, DockerfileError) as e:
         log.error(f"Configuration error: {e}")
         sys.exit(1)
@@ -56,6 +59,7 @@ def main():
     log.info(f"Image: {image.title} — {image.description}")
     log.info(f"Modules: {', '.join(m['module'] for m in modules)}")
     log.info(f"Platforms: {', '.join(image.platforms)}")
+    log.info(f"Variants: default{', slim' if image.slim else ''}")
     log.info(f"GHCR image: {GHCR_IMAGE or '(not set)'}")
     log.info(f"Docker Hub image: {CUSTOM_IMAGE or '(not set)'}")
 
@@ -75,9 +79,11 @@ def main():
         log.print_summary()
         sys.exit(0)
 
-    # Step 2: Check custom image on GHCR + Docker Hub
+    # Step 2: Check our tags on GHCR + Docker Hub. The slim variant has its own tag.
     log.info(f"\nStep 2: Checking custom image status...")
-    custom_image_complete = _check_custom_image(docker_tag, platforms)
+    required_tags = [docker_tag] + ([f"{docker_tag}-slim"] if image.slim else [])
+    missing_tags = [tag for tag in required_tags if not _check_custom_image(tag, platforms)]
+    custom_image_complete = not missing_tags
 
     # Step 3: Check module updates
     log.info(f"\nStep 3: Checking module updates...")
@@ -89,25 +95,29 @@ def main():
     else:
         log.set_summary("Module Changes", "None")
 
-    # Step 4: Check if the official image was republished (base OS / Go fixes).
+    # Step 4: Check if a base image was republished (base OS / Go fixes).
     # Only worth the requests when nothing above already forces a build.
     base_details = []
     if custom_image_complete and not modules_changed:
-        log.info(f"\nStep 4: Checking official base image updates...")
-        base_details = check_base_image_updates(docker_tag, image.official_variant_suffixes, platforms)
+        log.info(f"\nStep 4: Checking base image updates...")
+        base_details = check_base_image_updates(_variant_bases(image, dockerfile, docker_tag), platforms)
 
     # Final decision
     needs_build = False
     build_reason = "none"
     build_details = ""
 
-    if not custom_image_complete:
+    if docker_tag in missing_tags:
         needs_build = True
         build_reason = "new_caddy_version"
     elif modules_changed:
         needs_build = True
         build_reason = "module_update"
         build_details = "; ".join(module_details)
+    elif missing_tags:
+        needs_build = True
+        build_reason = "missing_variant"
+        build_details = f"{', '.join(missing_tags)} not published"
     elif base_details:
         needs_build = True
         build_reason = "base_image_update"
@@ -145,63 +155,78 @@ def _check_official_image(docker_tag, platforms):
     return False
 
 
-def _check_custom_image(docker_tag, platforms):
-    """Returns True if the custom image exists with every platform we ship on GHCR or Docker Hub."""
+def _check_custom_image(tag, platforms):
+    """Returns True if our tag exists with every platform we ship on GHCR or Docker Hub."""
     custom_complete = False
     ghcr_result = None
+    ghcr_key, dh_key = f"{tag} (GHCR)", f"{tag} (Docker Hub)"
 
     # GHCR (primary)
     if GHCR_IMAGE:
-        log.info(f"  Checking GHCR: ghcr.io/{GHCR_IMAGE}:{docker_tag}")
-        ghcr_result, ghcr_data = check_ghcr_tag(GHCR_IMAGE, docker_tag, platforms)
+        log.info(f"  Checking GHCR: ghcr.io/{GHCR_IMAGE}:{tag}")
+        ghcr_result, ghcr_data = check_ghcr_tag(GHCR_IMAGE, tag, platforms)
 
         if ghcr_result == TagCheckResult.FOUND:
             missing = platforms - ghcr_data
             if not missing:
                 custom_complete = True
                 log.info("  GHCR image complete.")
-                log.set_summary("Custom (GHCR)", "Complete")
+                log.set_summary(ghcr_key, "Complete")
             else:
                 log.info(f"  GHCR image missing: {missing}")
-                log.set_summary("Custom (GHCR)", f"Missing: {missing}")
+                log.set_summary(ghcr_key, f"Missing: {missing}")
         elif ghcr_result == TagCheckResult.NOT_FOUND:
             log.info("  GHCR tag not found.")
-            log.set_summary("Custom (GHCR)", "Not found")
+            log.set_summary(ghcr_key, "Not found")
         else:
             log.warn(f"  GHCR check failed: {ghcr_data}")
-            log.set_summary("Custom (GHCR)", f"Error: {ghcr_data}")
+            log.set_summary(ghcr_key, f"Error: {ghcr_data}")
     else:
         log.info("  GHCR image not configured, skipping.")
-        log.set_summary("Custom (GHCR)", "Not configured")
+        log.set_summary(ghcr_key, "Not configured")
 
     # Docker Hub (secondary)
     if CUSTOM_IMAGE:
-        log.info(f"  Checking Docker Hub: {CUSTOM_IMAGE}:{docker_tag}")
-        dh_result, dh_data = check_docker_hub_tag(CUSTOM_IMAGE, docker_tag)
+        log.info(f"  Checking Docker Hub: {CUSTOM_IMAGE}:{tag}")
+        dh_result, dh_data = check_docker_hub_tag(CUSTOM_IMAGE, tag)
 
         if dh_result == TagCheckResult.FOUND:
             dh_platforms = get_platforms_from_tag_data(dh_data, platforms)
             dh_missing = platforms - dh_platforms
             if not dh_missing:
                 log.info("  Docker Hub image complete.")
-                log.set_summary("Custom (Docker Hub)", "Complete")
+                log.set_summary(dh_key, "Complete")
                 # Fallback if GHCR errored
                 if not custom_complete and ghcr_result == TagCheckResult.ERROR:
                     custom_complete = True
                     log.info("  Using Docker Hub as fallback (GHCR errored).")
             else:
                 log.info(f"  Docker Hub image missing: {dh_missing}")
-                log.set_summary("Custom (Docker Hub)", f"Missing: {dh_missing}")
+                log.set_summary(dh_key, f"Missing: {dh_missing}")
         elif dh_result == TagCheckResult.NOT_FOUND:
             log.info("  Docker Hub tag not found.")
-            log.set_summary("Custom (Docker Hub)", "Not found")
+            log.set_summary(dh_key, "Not found")
         else:
-            log.set_summary("Custom (Docker Hub)", f"Error: {dh_data}")
+            log.set_summary(dh_key, f"Error: {dh_data}")
     else:
         log.info("  Docker Hub image not configured, skipping.")
-        log.set_summary("Custom (Docker Hub)", "Not configured")
+        log.set_summary(dh_key, "Not configured")
 
     return custom_complete
+
+
+def _variant_bases(image, dockerfile, docker_tag):
+    """``[(our_tag, base_image_ref)]`` for the base-image check.
+
+    The default image (and its -alpine aliases) is built FROM the official image of the
+    same version. The slim image's base is whatever its Dockerfile stage says, with
+    ``CADDY_VERSION`` expanded, so a fork using its own base is tracked too.
+    """
+    variants = [(f"{docker_tag}{suffix}", f"{OFFICIAL_CADDY_IMAGE}:{docker_tag}{suffix}") for suffix in image.official_variant_suffixes]
+    if image.slim:
+        stages = {stage.name: stage.image for stage in parse_stages(dockerfile, {"CADDY_VERSION": docker_tag})}
+        variants.append((f"{docker_tag}-slim", stages["slim"]))
+    return variants
 
 
 def _set_outputs(needs_build, version, reason, module_update, dry_run, details=""):

@@ -22,7 +22,7 @@ on:
         required: true
         type: string
       build_reason:
-        description: 'Why this build was triggered (new_caddy_version/module_update/base_image_update/manual)'
+        description: 'Why this build was triggered (new_caddy_version/module_update/missing_variant/base_image_update/manual)'
         required: false
         type: string
         default: ''

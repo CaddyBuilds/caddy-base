@@ -27,7 +27,9 @@ An image repo needs four files besides its README.
 
 **`Dockerfile`**, complete and buildable on its own. The checker reads the modules from the
 `xcaddy build` line, so this is the only place they are listed. Name the final stage
-`default`; a `slim` stage is optional.
+`default`. A `slim` stage is optional: `FROM ghcr.io/caddybuilds/caddy-base:latest`, copy the
+binary from the builder and `setcap` it (see [`examples/Dockerfile`](examples/Dockerfile));
+the checker reads the slim base from that `FROM` line.
 
 ```dockerfile
 ARG CADDY_VERSION
@@ -120,7 +122,11 @@ check without pinning package versions. The pin is bumped by editing the `FROM` 
 1. Fetch the latest Caddy release and confirm the official image has every platform we ship.
 2. If our image for that version is missing a platform on GHCR, build (`new_caddy_version`).
 3. Compare each module's latest commit with `module-versions.json`; on change, build (`module_update`) and commit the new state.
-4. Compare the official image's push time (for the platforms we ship) with our build time; if upstream republished, build (`base_image_update`).
+4. With `slim` enabled, if the `X.Y.Z-slim` tag is missing or incomplete, build (`missing_variant`).
+5. Compare each variant's base image with our build time, looking only at the platforms we ship:
+   the default image against `library/caddy:X.Y.Z` on Docker Hub, the slim image against the base
+   named in its Dockerfile stage (the caddy-base image on GHCR). If a base was republished, build
+   (`base_image_update`).
 
 The reason and details are passed to the build and recorded in the image labels
 (`caddy-build.reason`, `caddy-build.details`, `caddy-build.base-workflow`) and the release notes.
