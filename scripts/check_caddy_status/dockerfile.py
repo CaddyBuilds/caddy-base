@@ -1,13 +1,16 @@
-"""Reads the module list from the Dockerfile's ``xcaddy build`` command.
+"""Reads what the daily check needs from the Dockerfile: the ``xcaddy build`` module list
+and the slim stage's base image.
 
-The Dockerfile is the single source of truth for which modules an image contains, so
-forks only edit the ``--with`` lines and the daily check follows.
+The Dockerfile is the single source of truth for both, so forks only edit it and the
+daily check follows.
 """
 
 import re
 import shlex
 
 _WITH_RE = re.compile(r"^--with(?:=(.+))?$")
+_SLIM_FROM_RE = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)\s+AS\s+slim\s*$", re.IGNORECASE | re.MULTILINE)
+_GHCR_REF_RE = re.compile(r"^ghcr\.io/([^:\s]+):([^:\s]+)$")
 
 
 class DockerfileError(ValueError):
@@ -46,6 +49,28 @@ def parse_xcaddy_modules(path):
     if not modules:
         raise DockerfileError(f"No 'xcaddy build --with ...' modules found in '{path}'")
     return modules
+
+
+def parse_slim_base(path):
+    """Returns the slim stage's base as ``(repository, tag)`` on GHCR, e.g.
+    ``("caddybuilds/caddy-base", "latest")``.
+
+    The base-image check reads its build time from GHCR, so the stage must be
+    ``FROM ghcr.io/<owner>/<name>:<tag> AS slim``.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        raise DockerfileError(f"Cannot read Dockerfile '{path}': {e}") from e
+
+    m = _SLIM_FROM_RE.search(text)
+    if not m:
+        raise DockerfileError(f"slim is enabled but '{path}' has no 'AS slim' stage")
+    ref = _GHCR_REF_RE.match(m.group(1))
+    if not ref:
+        raise DockerfileError(f"The slim stage in '{path}' must be FROM ghcr.io/<owner>/<name>:<tag>, got {m.group(1)}")
+    return ref.group(1), ref.group(2)
 
 
 def _run_commands(text):

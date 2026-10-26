@@ -24,8 +24,8 @@ def _patch(hub, ghcr):
 
 class CheckBaseImageUpdatesTest(unittest.TestCase):
     VARIANTS = [
-        ("2.11.7", "caddy:2.11.7"),
-        ("2.11.7-alpine", "caddy:2.11.7-alpine"),
+        ("2.11.7", "library/caddy:2.11.7"),
+        ("2.11.7-alpine", "library/caddy:2.11.7-alpine"),
         ("2.11.7-slim", "ghcr.io/caddybuilds/caddy-base:latest"),
     ]
 
@@ -57,11 +57,7 @@ class CheckBaseImageUpdatesTest(unittest.TestCase):
     def test_docker_hub_fallback_for_our_build_time(self):
         hub = {"library/caddy:2.11.7": NEWER, "me/caddy-x:2.11.7": NEW}
         with _patch(hub, {}), mock.patch.object(base_image, "CUSTOM_IMAGE", "me/caddy-x"):
-            self.assertEqual(check_base_image_updates([("2.11.7", "caddy:2.11.7")], PLATFORMS), ["caddy:2.11.7 republished 2026-10-26"])
-
-    def test_unsupported_registry_and_bad_ref(self):
-        with _patch({}, {"o/caddy-x:2.11.7-slim": NEW}):
-            self.assertEqual(check_base_image_updates([("2.11.7-slim", "quay.io/x/y:1"), ("2.11.7", "bad@sha256:0")], PLATFORMS), [])
+            self.assertEqual(check_base_image_updates([("2.11.7", "library/caddy:2.11.7")], PLATFORMS), ["caddy:2.11.7 republished 2026-10-26"])
 
 
 if __name__ == "__main__":

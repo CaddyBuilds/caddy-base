@@ -8,7 +8,6 @@ on top of them picks those fixes up.
 from .config import CUSTOM_IMAGE, GHCR_IMAGE
 from .docker_hub import get_docker_hub_pushed
 from .ghcr import get_ghcr_created
-from .image_ref import parse_image_ref
 from .logger import log
 
 
@@ -16,22 +15,17 @@ def check_base_image_updates(variants, platforms):
     """Returns descriptions of variants whose base image is newer than our build (empty if none).
 
     Args:
-        variants: ``[(our_tag, base_image_ref)]``, e.g. ``("2.11.7", "caddy:2.11.7")`` for the
-            default image and ``("2.11.7-slim", "ghcr.io/caddybuilds/caddy-base:latest")`` for slim.
+        variants: ``[(our_tag, base)]``. ``base`` is a Docker Hub ``repository:tag`` such as
+            ``library/caddy:2.11.7``, or a GHCR one such as ``ghcr.io/caddybuilds/caddy-base:latest``.
         platforms: the platforms we ship; pushes of other platforms are ignored.
     """
     stale = []
     unknown = []
 
-    for our_tag, base_ref in variants:
-        try:
-            base = parse_image_ref(base_ref)
-        except ValueError as e:
-            log.warn(f"  Cannot check the base of '{our_tag}': {e}")
-            unknown.append(our_tag)
-            continue
-        upstream = base_image_time(base, platforms)
+    for our_tag, base in variants:
+        upstream = _base_time(base, platforms)
         ours = _custom_build_time(our_tag, platforms)
+        base = base.removeprefix("library/")
 
         if upstream is None or ours is None:
             log.warn(f"  Could not compare '{our_tag}' with {base} (base: {upstream}, ours: {ours}), skipping.")
@@ -52,18 +46,16 @@ def check_base_image_updates(variants, platforms):
     return stale
 
 
-def base_image_time(ref, platforms):
+def _base_time(base, platforms):
     """When a base image was last pushed (Docker Hub) or built (GHCR), or None.
 
     GHCR has no push time; the image config's ``created`` is the build time, and the
     caddy-base image is pushed by the run that builds it.
     """
-    if ref.is_docker_hub:
-        return get_docker_hub_pushed(ref.repository, ref.tag, platforms)
-    if ref.registry == "ghcr.io":
-        return get_ghcr_created(ref.repository, ref.tag)
-    log.warn(f"  Cannot read push times from {ref.registry}, skipping {ref}")
-    return None
+    repository, _, tag = base.rpartition(":")
+    if repository.startswith("ghcr.io/"):
+        return get_ghcr_created(repository.removeprefix("ghcr.io/"), tag)
+    return get_docker_hub_pushed(repository, tag, platforms)
 
 
 def _custom_build_time(tag, platforms):

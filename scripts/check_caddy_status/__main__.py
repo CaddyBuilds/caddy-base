@@ -15,7 +15,7 @@ from pathlib import Path
 from .base_image import check_base_image_updates
 from .config import CUSTOM_IMAGE, GHCR_IMAGE, OFFICIAL_CADDY_IMAGE
 from .docker_hub import check_docker_hub_tag, get_platforms_from_tag_data
-from .dockerfile import DockerfileError, parse_stages, parse_xcaddy_modules
+from .dockerfile import DockerfileError, parse_slim_base, parse_xcaddy_modules
 from .ghcr import check_ghcr_tag
 from .github_api import get_latest_caddy_release
 from .http_client import TagCheckResult
@@ -48,8 +48,7 @@ def main():
     try:
         image = load_image_config(root / args.config)
         modules = parse_xcaddy_modules(dockerfile)
-        if image.slim and "slim" not in {s.name for s in parse_stages(dockerfile)}:
-            raise DockerfileError(f"slim is enabled but '{dockerfile}' has no 'AS slim' stage")
+        slim_base = parse_slim_base(dockerfile) if image.slim else None
     except (ImageConfigError, DockerfileError) as e:
         log.error(f"Configuration error: {e}")
         sys.exit(1)
@@ -100,7 +99,7 @@ def main():
     base_details = []
     if custom_image_complete and not modules_changed:
         log.info(f"\nStep 4: Checking base image updates...")
-        base_details = check_base_image_updates(_variant_bases(image, dockerfile, docker_tag), platforms)
+        base_details = check_base_image_updates(_variant_bases(image, slim_base, docker_tag), platforms)
 
     # Final decision
     needs_build = False
@@ -215,17 +214,16 @@ def _check_custom_image(tag, platforms):
     return custom_complete
 
 
-def _variant_bases(image, dockerfile, docker_tag):
-    """``[(our_tag, base_image_ref)]`` for the base-image check.
+def _variant_bases(image, slim_base, docker_tag):
+    """``[(our_tag, base)]`` for the base-image check.
 
     The default image (and its -alpine aliases) is built FROM the official image of the
-    same version. The slim image's base is whatever its Dockerfile stage says, with
-    ``CADDY_VERSION`` expanded, so a fork using its own base is tracked too.
+    same version. The slim image is built FROM the GHCR image its Dockerfile stage names.
     """
     variants = [(f"{docker_tag}{suffix}", f"{OFFICIAL_CADDY_IMAGE}:{docker_tag}{suffix}") for suffix in image.official_variant_suffixes]
-    if image.slim:
-        stages = {stage.name: stage.image for stage in parse_stages(dockerfile, {"CADDY_VERSION": docker_tag})}
-        variants.append((f"{docker_tag}-slim", stages["slim"]))
+    if slim_base:
+        repository, tag = slim_base
+        variants.append((f"{docker_tag}-slim", f"ghcr.io/{repository}:{tag}"))
     return variants
 
 

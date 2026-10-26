@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from check_caddy_status.dockerfile import DockerfileError, parse_xcaddy_modules
+from check_caddy_status.dockerfile import DockerfileError, parse_slim_base, parse_xcaddy_modules
 
 
 def _write(text):
@@ -81,6 +81,37 @@ class ParseXcaddyModulesTest(unittest.TestCase):
     def test_missing_file_is_an_error(self):
         with self.assertRaises(DockerfileError):
             parse_xcaddy_modules("/nonexistent/Dockerfile")
+
+
+class ParseSlimBaseTest(unittest.TestCase):
+    STAGES = (
+        "ARG CADDY_VERSION\n"
+        "FROM --platform=$BUILDPLATFORM caddy:${CADDY_VERSION}-builder AS builder\n"
+        "RUN xcaddy build --with github.com/caddy-dns/bunny\n"
+        "FROM caddy:${CADDY_VERSION} AS default\n"
+        "COPY --from=builder /usr/bin/caddy /usr/bin/caddy\n"
+    )
+
+    def test_ghcr_base(self):
+        path = _write(self.STAGES + "\n# Slim image\nFROM ghcr.io/caddybuilds/caddy-base:latest AS slim\nRUN setcap x\n")
+        self.assertEqual(parse_slim_base(path), ("caddybuilds/caddy-base", "latest"))
+
+    def test_lowercase_as_and_platform_flag(self):
+        path = _write(self.STAGES + "FROM --platform=$TARGETPLATFORM ghcr.io/me/base:alpine3.23 as slim\n")
+        self.assertEqual(parse_slim_base(path), ("me/base", "alpine3.23"))
+
+    def test_missing_stage(self):
+        with self.assertRaisesRegex(DockerfileError, "no 'AS slim' stage"):
+            parse_slim_base(_write(self.STAGES))
+
+    def test_commented_out_stage_does_not_count(self):
+        with self.assertRaises(DockerfileError):
+            parse_slim_base(_write(self.STAGES + "# FROM ghcr.io/caddybuilds/caddy-base:latest AS slim\n"))
+
+    def test_base_must_be_ghcr_with_tag(self):
+        for base in ("alpine:3.23", "ghcr.io/caddybuilds/caddy-base", "ghcr.io/x/y:${TAG}x:y"):
+            with self.subTest(base=base), self.assertRaisesRegex(DockerfileError, "must be FROM ghcr.io"):
+                parse_slim_base(_write(self.STAGES + f"FROM {base} AS slim\n"))
 
 
 if __name__ == "__main__":
