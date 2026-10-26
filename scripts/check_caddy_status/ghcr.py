@@ -1,5 +1,4 @@
 import json
-import os
 
 import requests
 
@@ -22,23 +21,17 @@ _tokens = {}
 
 
 def _get_pull_token(image_name):
-    """Gets a GHCR pull token, cached per image for the run.
-
-    Anonymous by default, which covers public packages. ``GHCR_TOKEN`` (a GitHub token with
-    read access to the package, e.g. the workflow's ``GITHUB_TOKEN``) lets a repo check
-    its own package while it is still private; ``GHCR_USER`` is the matching login.
+    """Gets an anonymous GHCR pull token, cached per image for the run.
 
     Returns:
-        tuple: (token, error). (None, None) means the package is not visible to us.
+        tuple: (token, error). (None, None) means the package was never published.
     """
     if image_name in _tokens:
         return _tokens[image_name], None
 
     token_url = f"https://ghcr.io/token?scope=repository:{image_name}:pull"
-    github_token = os.environ.get("GHCR_TOKEN", "")
-    auth = (os.environ.get("GHCR_USER") or "token", github_token) if github_token else None
     try:
-        token_resp = request_with_retry(token_url, timeout=30, auth=auth)
+        token_resp = request_with_retry(token_url, timeout=30)
         if token_resp.status_code in (403, 404):
             return None, None
         if token_resp.status_code != 200:

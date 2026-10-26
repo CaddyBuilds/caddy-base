@@ -28,8 +28,3 @@ jobs:
             python -m check_caddy_status --dry-run
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Dry run of the caddy-base image check
-        run: PYTHONPATH=scripts python -m check_caddy_status.check_base_image --dry-run
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_USER: ${{ github.actor }}

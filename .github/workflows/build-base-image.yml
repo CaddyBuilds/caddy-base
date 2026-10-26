@@ -1,10 +1,9 @@
 # Builds and publishes the caddy-base image (see Dockerfile): the official caddy image's
 # Alpine layer without the Caddy binary. Image repos' slim stages are FROM it.
 #
-# Runs when the Dockerfile changes, on demand, and daily. The daily run only builds when
-# the check job finds the pinned Alpine tag republished (or our image missing). It is
-# scheduled a few hours before the image repos' own checks at 00:00 UTC, so a slim rebuild
-# they trigger lands on the fresh base.
+# Runs when the Dockerfile changes, on demand, and daily at 21:00 UTC, a few hours before
+# the image repos' checks. The daily run only builds when the pinned Alpine tag now points
+# at a different digest than the one our image was built from (or our image is missing).
 #
 # Image name comes from the repository (ghcr.io/<owner>/<repo>), so forks publish their own.
 name: Build caddy-base image
@@ -30,64 +29,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check:
-    name: Check whether a rebuild is needed
-    runs-on: ubuntu-latest
-    outputs:
-      needs_build: ${{ steps.check.outputs.NEEDS_BUILD }}
-      reason: ${{ steps.check.outputs.BUILD_REASON }}
-      details: ${{ steps.check.outputs.BUILD_DETAILS }}
-      base_tag: ${{ steps.check.outputs.BASE_TAG }}
-      platforms: ${{ steps.check.outputs.PLATFORMS }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: '>=3.11'
-
-      - name: Install Python dependencies
-        run: pip install requests
-
-      # GHCR_TOKEN lets the check read the package while it is still private (first run).
-      - name: Compare the pinned Alpine tag with our image
-        id: check
-        env:
-          PYTHONPATH: scripts
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_USER: ${{ github.actor }}
-        run: python -m check_caddy_status.check_base_image --dockerfile Dockerfile
-
   build:
-    name: Build and push
-    needs: check
-    if: ${{ github.event_name != 'schedule' || needs.check.outputs.needs_build == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Set image name and build reason
-        env:
-          CHECK_REASON: ${{ needs.check.outputs.reason }}
-          CHECK_DETAILS: ${{ needs.check.outputs.details }}
-        run: |
-          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-          case "$GITHUB_EVENT_NAME" in
-            schedule) reason="$CHECK_REASON"; details="$CHECK_DETAILS" ;;
-            push)     reason="dockerfile_change"; details="$GITHUB_SHA" ;;
-            *)        reason="manual"; details="" ;;
-          esac
-          echo "REASON=$reason" >> "$GITHUB_ENV"
-          echo "DETAILS=$details" >> "$GITHUB_ENV"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v4
@@ -96,83 +42,124 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Our image records the alpine digest it was built from in an index annotation.
+      # A different current digest means alpine was republished with fixes.
+      - name: Check whether a rebuild is needed
+        id: check
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          base=$(sed -nE 's/^FROM[[:space:]]+(alpine:[^[:space:]]+).*/\1/p' Dockerfile | head -n1)
+          [ -n "$base" ] || { echo "::error::No 'FROM alpine:<tag>' line in the Dockerfile."; exit 1; }
+          upstream=$(docker buildx imagetools inspect "$base" --format '{{json .Manifest}}' | jq -r .digest)
+          ours=$(docker buildx imagetools inspect --raw "$image:latest" 2>/dev/null \
+            | jq -r '.annotations["org.opencontainers.image.base.digest"] // empty' || true)
+          echo "$base is $upstream; $image:latest was built from ${ours:-nothing}"
+
+          needs_build=true; details=""
+          case "$GITHUB_EVENT_NAME" in
+            push) reason=dockerfile_change; details="$GITHUB_SHA" ;;
+            workflow_dispatch) reason=manual ;;
+            *)
+              if [ -z "$ours" ]; then reason=new_image
+              elif [ "$upstream" != "$ours" ]; then reason=base_image_update; details="$base republished"
+              else reason=none; needs_build=false
+              fi ;;
+          esac
+          echo "Build: $needs_build ($reason)"
+          {
+            echo "needs_build=$needs_build"
+            echo "reason=$reason"
+            echo "details=$details"
+            echo "image=$image"
+            echo "base=$base"
+            echo "base_tag=${base#alpine:}"
+            echo "base_digest=$upstream"
+            echo "platforms=$(PYTHONPATH=scripts python3 -c 'from check_caddy_status.platforms import OFFICIAL_PLATFORMS as p; print(",".join(p))')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        if: steps.check.outputs.needs_build == 'true'
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.needs_build == 'true'
+        uses: docker/setup-buildx-action@v4
+
       # `latest` floats; `alpine<tag>` names the Alpine release the Dockerfile pins.
       - name: Docker metadata
         id: meta
+        if: steps.check.outputs.needs_build == 'true'
         uses: docker/metadata-action@v6
         env:
           DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
         with:
-          images: ${{ env.IMAGE }}
+          images: ${{ steps.check.outputs.image }}
           flavor: |
             latest=false
           tags: |
             type=raw,value=latest
-            type=raw,value=alpine${{ needs.check.outputs.base_tag }}
+            type=raw,value=alpine${{ steps.check.outputs.base_tag }}
           labels: |
             org.opencontainers.image.title=Caddy base image
-            org.opencontainers.image.description=Alpine ${{ needs.check.outputs.base_tag }} with the official caddy image's packages, directories and default config, without the Caddy binary
+            org.opencontainers.image.description=Alpine ${{ steps.check.outputs.base_tag }} with the official caddy image's packages, directories and default config, without the Caddy binary
             org.opencontainers.image.vendor=${{ github.repository_owner }}
-            caddy-build.reason=${{ env.REASON }}
-            caddy-build.details=${{ env.DETAILS }}
+            org.opencontainers.image.base.name=docker.io/library/${{ steps.check.outputs.base }}
+            org.opencontainers.image.base.digest=${{ steps.check.outputs.base_digest }}
+            caddy-build.reason=${{ steps.check.outputs.reason }}
+            caddy-build.details=${{ steps.check.outputs.details }}
           annotations: |
             org.opencontainers.image.title=Caddy base image
-            org.opencontainers.image.description=Alpine ${{ needs.check.outputs.base_tag }} with the official caddy image's packages, directories and default config, without the Caddy binary
+            org.opencontainers.image.description=Alpine ${{ steps.check.outputs.base_tag }} with the official caddy image's packages, directories and default config, without the Caddy binary
             org.opencontainers.image.vendor=${{ github.repository_owner }}
-            caddy-build.reason=${{ env.REASON }}
-            caddy-build.details=${{ env.DETAILS }}
+            org.opencontainers.image.base.name=docker.io/library/${{ steps.check.outputs.base }}
+            org.opencontainers.image.base.digest=${{ steps.check.outputs.base_digest }}
+            caddy-build.reason=${{ steps.check.outputs.reason }}
+            caddy-build.details=${{ steps.check.outputs.details }}
 
+      # The build context pins FROM to the digest checked above, so the recorded digest is
+      # exactly the base the image was built on.
       - name: Build and push
+        if: steps.check.outputs.needs_build == 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
           push: true
-          platforms: ${{ needs.check.outputs.platforms }}
+          build-contexts: |
+            ${{ steps.check.outputs.base }}=docker-image://${{ steps.check.outputs.base }}@${{ steps.check.outputs.base_digest }}
+          platforms: ${{ steps.check.outputs.platforms }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
 
-      # What a slim stage relies on: setcap from libcap, the default config and welcome page,
-      # the writable data and config directories.
+      # What a slim stage relies on: setcap, the default config and welcome page, the
+      # data and config directories.
       - name: Verify pushed image on every platform
+        if: steps.check.outputs.needs_build == 'true'
         env:
-          PLATFORMS: ${{ needs.check.outputs.platforms }}
+          IMAGE: ${{ steps.check.outputs.image }}:latest
+          PLATFORMS: ${{ steps.check.outputs.platforms }}
         run: |
           failed=""
-          for platform in $(echo "$PLATFORMS" | tr ',' ' '); do
-            echo "::group::${IMAGE}:latest ${platform}"
-            if docker pull --quiet --platform "$platform" "${IMAGE}:latest" >/dev/null \
-               && docker run --rm --platform "$platform" "${IMAGE}:latest" sh -c '
-                    command -v setcap >/dev/null \
-                    && test -s /etc/caddy/Caddyfile \
-                    && test -s /usr/share/caddy/index.html \
-                    && test -d /data/caddy && test -d /config/caddy \
-                    && cat /etc/alpine-release'; then
-              echo "ok"
-            else
-              echo "::error::${IMAGE}:latest on ${platform} failed verification"
-              failed="$failed ${platform}"
-            fi
+          for platform in ${PLATFORMS//,/ }; do
+            echo "::group::$platform"
+            docker run --rm --pull always --platform "$platform" "$IMAGE" sh -c \
+              'command -v setcap && test -s /etc/caddy/Caddyfile && test -s /usr/share/caddy/index.html \
+               && test -d /data/caddy && test -d /config/caddy && cat /etc/alpine-release' \
+              || failed="$failed $platform"
             echo "::endgroup::"
           done
-          if [ -n "$failed" ]; then
-            echo "::error::Verification failed for:$failed"
-            exit 1
-          fi
-          echo "Verified on: $PLATFORMS"
+          [ -z "$failed" ] || { echo "::error::Verification failed for:$failed"; exit 1; }
 
       - name: Notify on failure
         if: failure()
         uses: actions/github-script@v9
-        env:
-          REASON: ${{ env.REASON }}
         with:
           script: |
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: 'Build failed: caddy-base image',
-              body: `The caddy-base image build failed.\n\n- **Reason:** ${process.env.REASON}\n- **Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              body: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               labels: ['build-failure']
             });
