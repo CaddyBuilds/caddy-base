@@ -34,7 +34,7 @@ optional: `FROM ghcr.io/caddybuilds/caddy-base:latest` and copy the binary from 
 enables it.
 
 ```dockerfile
-ARG CADDY_VERSION
+ARG CADDY_VERSION=2
 FROM --platform=$BUILDPLATFORM caddy:${CADDY_VERSION}-builder AS builder
 ARG TARGETOS TARGETARCH TARGETVARIANT
 RUN GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=${TARGETVARIANT#v} CGO_ENABLED=0 XCADDY_PRINT_VERSION=0 \
