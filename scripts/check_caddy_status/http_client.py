@@ -13,14 +13,14 @@ class TagCheckResult(Enum):
     ERROR = "error"
 
 
-def request_with_retry(url, headers=None, timeout=30):
+def request_with_retry(url, headers=None, timeout=30, auth=None):
     """GET request with exponential backoff for transient failures (429, 5xx, timeouts)."""
     last_exception = None
     response = None
 
     for attempt in range(MAX_RETRIES):
         try:
-            response = requests.get(url, headers=headers, timeout=timeout)
+            response = requests.get(url, headers=headers, timeout=timeout, auth=auth)
             if response.status_code == 429 or response.status_code >= 500:
                 wait = BACKOFF_BASE ** attempt
                 log.warn(
