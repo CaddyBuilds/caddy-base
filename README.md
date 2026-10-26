@@ -17,6 +17,8 @@ workflows, so a fix lands in every repo on its next run.
 | `.github/workflows/build-image.yml` | Reusable: multi-platform build, push to GHCR and Docker Hub, verify, GitHub Release, failure issue |
 | `.github/workflows/check-release.yml` | Reusable: daily check for new Caddy releases, module commits and republished official images; dispatches a build |
 | `scripts/check_caddy_status/` | The checker. Reads the image repo's `Dockerfile` and `caddy-image.json`, tracks module commits in `module-versions.json` |
+| `Dockerfile` | The [caddy-base image](#the-caddy-base-image): Alpine with everything the official caddy image has except the Caddy binary |
+| `.github/workflows/build-base-image.yml` | Builds and publishes `ghcr.io/caddybuilds/caddy-base`; daily rebuild when the pinned Alpine tag's digest changes |
 | `examples/` | A complete image repo skeleton: `Dockerfile`, `caddy-image.json`, the two caller workflows |
 
 ## Using it in an image repo
@@ -94,6 +96,27 @@ image repo builds and publishes its own image without changing anything here.
 Docker Hub is used when `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets exist;
 `DOCKERHUB_REPOSITORY_NAME` (secret or variable) overrides the Docker Hub repository.
 
+## The caddy-base image
+
+`ghcr.io/caddybuilds/caddy-base` is the official caddy image's Alpine layer without the
+Caddy binary: the same apk packages (`ca-certificates`, `curl`, `libcap`, `mailcap`),
+directories, default `Caddyfile`, welcome page, environment, ports, workdir and `CMD`, built
+from the [`Dockerfile`](Dockerfile) at the repo root for every platform the official image
+publishes. An image repo's `slim` stage copies its custom-built binary onto it, so the slim
+image carries one Caddy binary instead of the stock one plus ours.
+
+| Tag | Meaning |
+|---|---|
+| `latest` | Floating; what slim stages reference |
+| `alpine3.23` | The Alpine release pinned in the `Dockerfile`'s `FROM` line |
+
+The build runs when the `Dockerfile` changes and daily at 21:00 UTC, three hours before the
+image repos' checks. Each image records the alpine digest it was built from
+(`org.opencontainers.image.base.digest`). The daily run rebuilds only when
+`library/alpine:<pin>` now points at a different digest, so Alpine fixes reach the slim
+images on the next day's check without pinning package versions. The pin is bumped by
+editing the `FROM` line.
+
 ## How the check decides to build
 
 1. Fetch the latest Caddy release and confirm the official image has every platform we ship.
@@ -123,6 +146,10 @@ python -m unittest discover -s tests -t . -v
 cd /path/to/caddy-cloudflare
 PYTHONPATH=/path/to/caddy-base/scripts GITHUB_REPOSITORY=owner/repo \
   python -m check_caddy_status --dry-run
+
+
+# build the caddy-base image locally
+docker buildx build --platform linux/arm64 --load -t ghcr.io/caddybuilds/caddy-base:latest .
 ```
 
 ## License
