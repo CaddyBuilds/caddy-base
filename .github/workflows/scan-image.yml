@@ -1,0 +1,103 @@
+# Reusable: scans the caller's published images with Trivy and uploads the results to
+# GitHub code scanning, so known vulnerabilities show up in the repo's Security tab and
+# close on their own once a rebuild no longer contains them. A table of the same results
+# goes in the run summary for readers without write access. Report only: findings never
+# fail the run, because fixes arrive through rebuilds, not pins. Scans `latest` and, when
+# the config enables it, `slim`, on linux/amd64.
+#
+# Caller:
+#   jobs:
+#     scan:
+#       uses: CaddyBuilds/caddy-base/.github/workflows/scan-image.yml@v1
+name: Scan Images (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      config_file:
+        description: 'Image config file in the caller repo'
+        required: false
+        type: string
+        default: caddy-image.json
+      base_repository:
+        description: 'Repository that hosts this workflow and the config loader (override in forks of caddy-base)'
+        required: false
+        type: string
+        default: CaddyBuilds/caddy-base
+
+permissions:
+  contents: read
+  packages: read
+  security-events: write
+
+jobs:
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.tags.outputs.tags }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Checkout caddy-base
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.base_repository }}
+          ref: ${{ job.workflow_sha || github.job_workflow_sha }}
+          path: .caddy-base
+
+      - name: List tags to scan
+        id: tags
+        env:
+          CONFIG: ${{ inputs.config_file }}
+        run: |
+          test -f "$CONFIG" || { echo "::error::Image config '$CONFIG' not found."; exit 1; }
+          slim=$(PYTHONPATH=.caddy-base/scripts python3 -m check_caddy_status.image_config "$CONFIG" | sed -n 's/^slim=//p')
+          if [ "$slim" = "true" ]; then tags='["latest","slim"]'; else tags='["latest"]'; fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "Scanning: $tags"
+
+  scan:
+    needs: targets
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.targets.outputs.tags) }}
+    steps:
+      - name: Set image name
+        run: echo "GHCR_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      # Pinned by commit: trivy-action release tags were hijacked in March 2026.
+      # Credentials let forks scan a private GHCR package; public images ignore them.
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          version: v0.76.1
+          image-ref: ${{ env.GHCR_IMAGE }}:${{ matrix.tag }}
+          scanners: vuln
+          format: json
+          output: trivy-${{ matrix.tag }}.json
+
+      # Code scanning alerts need write access to view, so the same results also go in the
+      # run summary, which anyone can read on a public repo.
+      - name: Convert results
+        env:
+          TAG: ${{ matrix.tag }}
+        run: |
+          trivy convert --format sarif --output "trivy-$TAG.sarif" "trivy-$TAG.json"
+          {
+            echo "## ${GHCR_IMAGE}:${TAG}"
+            echo '```'
+            trivy convert --format table "trivy-$TAG.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          sarif_file: trivy-${{ matrix.tag }}.sarif
+          category: trivy-${{ matrix.tag }}
