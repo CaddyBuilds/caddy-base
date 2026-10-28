@@ -16,10 +16,11 @@ workflows, so a fix lands in every repo on its next run.
 |---|---|
 | `.github/workflows/build-image.yml` | Reusable: multi-platform build, push to GHCR and Docker Hub, verify, GitHub Release, failure issue |
 | `.github/workflows/check-release.yml` | Reusable: daily check for new Caddy releases, module commits and republished official images; dispatches a build |
+| `.github/workflows/scan-image.yml` | Reusable: Trivy scan of the published `latest` and `slim` images, results to code scanning and the run summary |
 | `scripts/check_caddy_status/` | The checker. Reads the image repo's `Dockerfile` and `caddy-image.json`, tracks module commits in `module-versions.json` |
 | `Dockerfile` | The [caddy-base image](#the-caddy-base-image): Alpine with everything the official caddy image has except the Caddy binary |
 | `.github/workflows/build-base-image.yml` | Builds and publishes `ghcr.io/caddybuilds/caddy-base`; daily rebuild when the pinned Alpine tag's digest changes |
-| `examples/` | A complete image repo skeleton: `Dockerfile`, `caddy-image.json`, the two caller workflows |
+| `examples/` | A complete image repo skeleton: `Dockerfile`, `caddy-image.json`, the three caller workflows |
 
 ## Using it in an image repo
 
@@ -75,7 +76,7 @@ emulated; only the final `COPY` stage runs per platform. See [`examples/Dockerfi
 The schema lives in `scripts/check_caddy_status/image_config.py`; the build workflow runs
 that module to read the file, so the checker and the build always agree on it.
 
-**Two caller workflows**, copied from [`examples/.github/workflows/`](examples/.github/workflows/).
+**Three caller workflows**, copied from [`examples/.github/workflows/`](examples/.github/workflows/).
 A manual build takes an optional `note`, recorded in the release notes and the
 `caddy-build.details` label so a rebuild can be traced to its cause:
 
@@ -95,6 +96,18 @@ jobs:
   check:
     uses: CaddyBuilds/caddy-base/.github/workflows/check-release.yml@v1
     secrets: inherit
+```
+
+The scan runs daily and after each successful build. It only reports: findings appear in
+the Security tab (write access needed to view) and as a table in the run summary
+(public on a public repo), and never fail the run. Copy the example file for its triggers
+and permissions; the job itself is:
+
+```yaml
+jobs:
+  scan:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    uses: CaddyBuilds/caddy-base/.github/workflows/scan-image.yml@v1
 ```
 
 Image names come from the repository name (`ghcr.io/<owner>/<repo>`), so a fork of any
